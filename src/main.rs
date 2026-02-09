@@ -18,7 +18,7 @@ use vmkatz::vbox::VBoxLayer;
 #[cfg(feature = "vmware")]
 use vmkatz::vmware::VmwareLayer;
 #[cfg(any(feature = "vmware", feature = "vbox"))]
-use vmkatz::windows::offsets::WIN10_X64_EPROCESS;
+// EPROCESS offsets auto-detected at runtime from ALL_EPROCESS_OFFSETS
 #[cfg(any(feature = "vmware", feature = "vbox"))]
 use vmkatz::windows::process;
 
@@ -349,12 +349,12 @@ fn run_with_layer<L: PhysicalMemory, F: FnOnce() -> anyhow::Result<L>>(
 ) -> anyhow::Result<()> {
     let layer = make_layer()?;
 
-    // Find System process
-    let system = process::find_system_process(&layer, &WIN10_X64_EPROCESS)
-        .context("Failed to find System process. Try different EPROCESS offsets.")?;
+    // Find System process (auto-detect Windows version from EPROCESS layout)
+    let (system, eprocess_offsets) = process::find_system_process_auto(&layer)
+        .context("Failed to find System process")?;
 
     // Enumerate all processes
-    let processes = process::enumerate_processes(&layer, &system, &WIN10_X64_EPROCESS)
+    let processes = process::enumerate_processes(&layer, &system, &eprocess_offsets)
         .context("Failed to enumerate processes")?;
 
     if verbose {

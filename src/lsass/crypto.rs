@@ -26,6 +26,9 @@ const KEY_OFFSET_SETS: &[(i64, i64, i64)] = &[
     (61, -73, 16),  // LSA_x64_5: Win10 1507-1607
     (71, -89, 16),  // LSA_x64_9: Win11 22H2+
     (58, -89, 16),  // LSA_x64_8: Win11 early
+    (62, -74, 23),  // LSA_x64_3: Win8.1 / Server 2012 R2
+    (59, -61, 23),  // LSA_x64_1: Win7 / Server 2008 R2
+    (62, -70, 23),  // LSA_x64_2: Win8 / Server 2012
 ];
 
 /// Extract IV, 3DES key, and AES key from lsasrv.dll.

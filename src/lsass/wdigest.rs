@@ -24,13 +24,13 @@ struct WdigestOffsets {
     password: u64,
 }
 
-const WDIGEST_OFFSETS: WdigestOffsets = WdigestOffsets {
-    flink: 0x00,
-    luid: 0x20,
-    username: 0x30,
-    domain: 0x40,
-    password: 0x50,
-};
+/// Multiple offset variants for different Windows versions.
+const WDIGEST_OFFSET_VARIANTS: &[WdigestOffsets] = &[
+    // Win10 1507+ / Win11: extra This+padding before LUID
+    WdigestOffsets { flink: 0x00, luid: 0x20, username: 0x30, domain: 0x40, password: 0x50 },
+    // Win7 / Win8 / Win8.1: no extra padding, smaller struct
+    WdigestOffsets { flink: 0x00, luid: 0x10, username: 0x28, domain: 0x38, password: 0x48 },
+];
 
 /// Extract WDigest credentials (plaintext passwords) from wdigest.dll.
 pub fn extract_wdigest_credentials(
@@ -84,7 +84,8 @@ pub fn extract_wdigest_credentials(
         }
     }
 
-    let offsets = &WDIGEST_OFFSETS;
+    // Auto-detect offset variant: try each variant on the first entry
+    let offsets = detect_wdigest_offsets(vmem, head_flink);
     let mut current = head_flink;
     let mut visited = std::collections::HashSet::new();
 
@@ -156,8 +157,6 @@ fn find_wdigest_list_in_data(
         data_base, data_size
     );
 
-    let offsets = &WDIGEST_OFFSETS;
-
     for off in (0..data_size.saturating_sub(16)).step_by(8) {
         let flink = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
         let blink = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
@@ -183,7 +182,8 @@ fn find_wdigest_list_in_data(
             continue;
         }
 
-        // Validate by reading first entry
+        // Validate by reading first entry (try each offset variant)
+        let offsets = detect_wdigest_offsets(vmem, flink);
         let luid = match vmem.read_virt_u64(flink + offsets.luid) {
             Ok(l) => l,
             Err(_) => continue,
@@ -227,5 +227,28 @@ fn find_wdigest_list(vmem: &impl VirtualMemory, pattern_addr: u64) -> Result<u64
     Err(crate::error::GovmemError::PatternNotFound(
         "LEA for wdigest l_LogSessList".to_string(),
     ))
+}
+
+/// Auto-detect WDigest offset variant by probing the first entry.
+fn detect_wdigest_offsets(vmem: &impl VirtualMemory, first_entry: u64) -> &'static WdigestOffsets {
+    for variant in WDIGEST_OFFSET_VARIANTS {
+        // Check LUID: should be small nonzero value
+        let luid = match vmem.read_virt_u64(first_entry + variant.luid) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if luid == 0 || luid > 0xFFFFFFFF {
+            continue;
+        }
+        // Check username: should be valid UNICODE_STRING
+        let username = vmem
+            .read_win_unicode_string(first_entry + variant.username)
+            .unwrap_or_default();
+        if !username.is_empty() && username.len() < 256 {
+            return variant;
+        }
+    }
+    // Default to Win10+ offsets
+    &WDIGEST_OFFSET_VARIANTS[0]
 }
 

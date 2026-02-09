@@ -2,7 +2,7 @@ use crate::error::{GovmemError, Result};
 use crate::memory::{PhysicalMemory, VirtualMemory};
 use crate::paging::translate::{PageTableWalker, ProcessMemory};
 use crate::windows::eprocess::EprocessReader;
-use crate::windows::offsets::EprocessOffsets;
+use crate::windows::offsets::{EprocessOffsets, ALL_EPROCESS_OFFSETS};
 
 /// PEB + 0x20 = ProcessParameters (RTL_USER_PROCESS_PARAMETERS*)
 const PEB_PROCESS_PARAMETERS: u64 = 0x20;
@@ -17,6 +17,20 @@ pub struct Process {
     pub dtb: u64,
     pub eprocess_phys: u64,
     pub peb_vaddr: u64,
+}
+
+/// Find the System process by trying all known EPROCESS offset sets.
+/// Returns the process and the matching offsets.
+pub fn find_system_process_auto(
+    phys: &impl PhysicalMemory,
+) -> Result<(Process, EprocessOffsets)> {
+    for offsets in ALL_EPROCESS_OFFSETS {
+        match find_system_process(phys, offsets) {
+            Ok(proc) => return Ok((proc, *offsets)),
+            Err(_) => continue,
+        }
+    }
+    Err(GovmemError::SystemProcessNotFound)
 }
 
 /// Find the System process (PID 4) by scanning physical memory.

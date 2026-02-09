@@ -804,8 +804,9 @@ fn scan_phys_for_kerberos_credentials<P: PhysicalMemory>(
             continue;
         }
 
-        // Try to decrypt the password
-        let password = crate::lsass::kerberos::extract_kerb_password(vmem, *vaddr, keys)
+        // Try to decrypt the password (try Win10 1607+ offset first, then older)
+        let password = crate::lsass::kerberos::extract_kerb_password(vmem, *vaddr, 0x30, keys)
+            .or_else(|_| crate::lsass::kerberos::extract_kerb_password(vmem, *vaddr, 0x28, keys))
             .unwrap_or_default();
 
         log::info!(
