@@ -434,16 +434,23 @@ pub fn extract_all_credentials<P: PhysicalMemory>(
         }
     }
 
-    // Fill in well-known LUID names when username/domain are empty
+    // Fill in well-known LUID names/domains when empty
     // (happens when session was created by DPAPI/other provider without WDigest discovery)
     for cred in all_creds.values_mut() {
-        if cred.username.is_empty() {
-            match cred.luid {
-                0x3e7 => { cred.username = "SYSTEM".to_string(); }
-                0x3e4 => { cred.username = "NETWORK SERVICE".to_string(); }
-                0x3e5 => { cred.username = "LOCAL SERVICE".to_string(); }
-                _ => {}
+        match cred.luid {
+            0x3e7 => {
+                if cred.username.is_empty() { cred.username = "SYSTEM".to_string(); }
+                if cred.domain.is_empty() { cred.domain = "NT AUTHORITY".to_string(); }
             }
+            0x3e4 => {
+                if cred.username.is_empty() { cred.username = "NETWORK SERVICE".to_string(); }
+                if cred.domain.is_empty() { cred.domain = "NT AUTHORITY".to_string(); }
+            }
+            0x3e5 => {
+                if cred.username.is_empty() { cred.username = "LOCAL SERVICE".to_string(); }
+                if cred.domain.is_empty() { cred.domain = "NT AUTHORITY".to_string(); }
+            }
+            _ => {}
         }
     }
 
