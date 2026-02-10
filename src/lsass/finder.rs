@@ -863,6 +863,8 @@ fn scan_phys_for_kerberos_credentials<P: PhysicalMemory>(
 
     // Process candidates: validate against known users and try decryption
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut readable_count = 0u32;
+    let mut matched_count = 0u32;
 
     for vaddr in &cred_candidates {
         let username = vmem.read_win_unicode_string(*vaddr).unwrap_or_default();
@@ -871,12 +873,14 @@ fn scan_phys_for_kerberos_credentials<P: PhysicalMemory>(
         if username.is_empty() || domain.is_empty() {
             continue;
         }
+        readable_count += 1;
 
         // Only accept credentials that match known logon sessions (from MSV/WDigest)
         let key = (username.to_lowercase(), domain.to_lowercase());
         if !known_users.contains(&key) {
             continue;
         }
+        matched_count += 1;
 
         if !seen.insert(key) {
             continue;
@@ -901,6 +905,13 @@ fn scan_phys_for_kerberos_credentials<P: PhysicalMemory>(
                 tickets: Vec::new(),
             },
         ));
+    }
+
+    if readable_count > 0 {
+        log::info!(
+            "Kerberos physical scan: {} readable, {} matched known users, {} extracted",
+            readable_count, matched_count, results.len()
+        );
     }
 
     results
