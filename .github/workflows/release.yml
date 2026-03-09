@@ -17,23 +17,18 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: linux-x86_64
-            strip: strip
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: esxi-x86_64
-            strip: strip
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: windows-x86_64
-            strip: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             name: macos-x86_64
-            strip: strip
           - target: aarch64-apple-darwin
             os: macos-latest
             name: macos-aarch64
-            strip: strip
 
     runs-on: ${{ matrix.os }}
 
@@ -51,21 +46,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --features "ntds.dit"
-
-      - name: Strip binary (Unix)
-        if: matrix.strip != '' && runner.os != 'Windows'
-        run: ${{ matrix.strip }} target/${{ matrix.target }}/release/vmkatz
-
-      - name: Strip binary (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vcToolsPath = & $vsWhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64" | Select-Object -First 1
-          & "$vcToolsPath\dumpbin.exe" /HEADERS target\${{ matrix.target }}\release\vmkatz.exe | Out-Null
-          # Use editbin to strip debug info
-          & "$vcToolsPath\editbin.exe" /RELEASE target\${{ matrix.target }}\release\vmkatz.exe
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Archive (Unix)
         if: runner.os != 'Windows'
