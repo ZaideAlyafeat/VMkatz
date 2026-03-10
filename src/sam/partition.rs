@@ -4,9 +4,17 @@ use crate::error::Result;
 
 /// Parse MBR/GPT and find all NTFS partitions, returning their byte offsets.
 pub(crate) fn find_ntfs_partitions<R: Read + Seek>(reader: &mut R) -> Result<Vec<u64>> {
-    reader.seek(SeekFrom::Start(0))?;
+    if reader.seek(SeekFrom::Start(0)).is_err() {
+        return Err(crate::error::VmkatzError::DecryptionError(
+            "Cannot seek to MBR (I/O error)".to_string(),
+        ));
+    }
     let mut mbr = [0u8; 512];
-    reader.read_exact(&mut mbr)?;
+    if reader.read_exact(&mut mbr).is_err() {
+        return Err(crate::error::VmkatzError::DecryptionError(
+            "Cannot read MBR (I/O error on sector 0)".to_string(),
+        ));
+    }
 
     // Check MBR signature
     if mbr[510] != 0x55 || mbr[511] != 0xAA {
@@ -93,9 +101,13 @@ fn find_gpt_ntfs_partitions<R: Read + Seek>(reader: &mut R) -> Result<Vec<u64>> 
 
     for i in 0..num_entries {
         let entry_offset = entries_offset + i as u64 * entry_size as u64;
-        reader.seek(SeekFrom::Start(entry_offset))?;
+        if reader.seek(SeekFrom::Start(entry_offset)).is_err() {
+            continue; // Skip entries we can't seek to
+        }
         let mut entry = vec![0u8; entry_size as usize];
-        reader.read_exact(&mut entry)?;
+        if reader.read_exact(&mut entry).is_err() {
+            continue; // Skip entries we can't read (I/O error)
+        }
 
         let type_guid = &entry[0..16];
 

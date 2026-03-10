@@ -3,6 +3,27 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::error::Result;
 use super::hive;
 
+/// Read into `buf` with resilient I/O: on error, zero-fill the failing 4KB block
+/// and continue. This allows extraction from live/in-use block devices where
+/// individual sectors may be temporarily locked.
+fn resilient_read<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
+    const BLOCK: usize = 4096;
+    let mut total = 0;
+    while total < buf.len() {
+        let end = (total + BLOCK).min(buf.len());
+        match reader.read(&mut buf[total..end]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(_) => {
+                // Zero-fill this block and advance
+                buf[total..end].fill(0);
+                total = end;
+            }
+        }
+    }
+    total
+}
+
 /// Maximum hive size we'll try to read (16MB — covers even large SYSTEM hives).
 pub(super) const MAX_HIVE_SIZE: u64 = 16 * 1024 * 1024;
 /// Scan chunk size for reading the disk (1MB).
@@ -34,11 +55,19 @@ pub(super) fn scan_for_hives<R: Read + Seek>(reader: &mut R) -> Result<super::Hi
     let mut chunk = vec![0u8; SCAN_CHUNK];
 
     while offset < disk_size {
-        reader.seek(SeekFrom::Start(offset))?;
+        if reader.seek(SeekFrom::Start(offset)).is_err() {
+            // Seek failed (I/O error on live device) — skip this chunk
+            offset += SCAN_CHUNK as u64;
+            continue;
+        }
         let n = match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(_) => break,
+            Err(_) => {
+                // I/O error (live VM, bad sector) — skip this chunk and continue
+                offset += SCAN_CHUNK as u64;
+                continue;
+            }
         };
 
         // Scan this chunk at cluster boundaries for "regf" magic
@@ -68,7 +97,7 @@ pub(super) fn scan_for_hives<R: Read + Seek>(reader: &mut R) -> Result<super::Hi
                     }
                 }
                 // Restore read position for continued scanning
-                reader.seek(SeekFrom::Start(offset + n as u64))?;
+                let _ = reader.seek(SeekFrom::Start(offset + n as u64));
             }
             pos += CLUSTER_SIZE;
         }
@@ -119,10 +148,10 @@ fn try_read_hive<R: Read + Seek>(reader: &mut R, offset: u64) -> Option<(String,
 
     let total_size = 0x1000 + bins_size;
 
-    // Read the complete hive
+    // Read the complete hive with resilient I/O (zero-fill on bad sectors)
     reader.seek(SeekFrom::Start(offset)).ok()?;
     let mut data = vec![0u8; total_size as usize];
-    reader.read_exact(&mut data).ok()?;
+    resilient_read(reader, &mut data);
 
     // Parse to get root key name
     let hive = match hive::Hive::new(&data) {
@@ -193,11 +222,17 @@ pub(super) fn scan_for_hbin_roots<R: Read + Seek>(reader: &mut R) -> Result<supe
     let mut chunk = vec![0u8; SCAN_CHUNK];
 
     while offset < disk_size {
-        reader.seek(SeekFrom::Start(offset))?;
+        if reader.seek(SeekFrom::Start(offset)).is_err() {
+            offset += SCAN_CHUNK as u64;
+            continue;
+        }
         let n = match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(_) => break,
+            Err(_) => {
+                offset += SCAN_CHUNK as u64;
+                continue;
+            }
         };
 
         let mut pos = 0;
@@ -235,7 +270,7 @@ pub(super) fn scan_for_hbin_roots<R: Read + Seek>(reader: &mut R) -> Result<supe
                             return Ok((sam_data.take().unwrap_or_default(), system_data.take().unwrap_or_default(), security_data));
                         }
                     }
-                    reader.seek(SeekFrom::Start(offset + n as u64))?;
+                    let _ = reader.seek(SeekFrom::Start(offset + n as u64));
                 }
             }
             pos += CLUSTER_SIZE;
@@ -333,10 +368,13 @@ fn try_read_hbin_hive<R: Read + Seek>(
             break;
         }
 
-        reader.seek(SeekFrom::Start(read_offset)).ok()?;
+        if reader.seek(SeekFrom::Start(read_offset)).is_err() {
+            break;
+        }
 
         // Read first page of potential hbin block
-        if reader.read_exact(&mut hbin_buf).is_err() {
+        let n = resilient_read(reader, &mut hbin_buf);
+        if n < 12 {
             break;
         }
 
@@ -360,12 +398,12 @@ fn try_read_hbin_hive<R: Read + Seek>(
             break;
         }
 
-        // Read the full hbin block
+        // Read the full hbin block with resilient I/O
         let mut block = vec![0u8; block_size];
-        reader.seek(SeekFrom::Start(read_offset)).ok()?;
-        if reader.read_exact(&mut block).is_err() {
+        if reader.seek(SeekFrom::Start(read_offset)).is_err() {
             break;
         }
+        resilient_read(reader, &mut block);
 
         hbin_data.extend_from_slice(&block);
         read_offset += block_size as u64;

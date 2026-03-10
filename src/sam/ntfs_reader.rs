@@ -93,6 +93,8 @@ pub(crate) fn find_entry<'n, R: Read + Seek>(
 }
 
 /// Read file data ($DATA attribute) into a Vec<u8>.
+/// Uses resilient reads — on I/O errors, zero-fills the failing chunk and continues.
+/// This allows extraction from live/in-use block devices.
 pub(crate) fn read_file_data<R: Read + Seek>(
     file: &ntfs::NtfsFile,
     reader: &mut R,
@@ -111,10 +113,31 @@ pub(crate) fn read_file_data<R: Read + Seek>(
     })?;
     let len = data_value.len();
     let mut buf = vec![0u8; len as usize];
-    data_value.read_exact(reader, &mut buf).map_err(|e| {
-        crate::error::VmkatzError::DecryptionError(format!("Read file data error: {}", e))
-    })?;
-    Ok(buf)
+    // Try exact read first; on error, use chunked resilient read
+    match data_value.read_exact(reader, &mut buf) {
+        Ok(()) => Ok(buf),
+        Err(e) => {
+            log::warn!("Exact read failed ({}), retrying with resilient I/O", e);
+            // Reset and try chunked reads with zero-fill on errors
+            let mut data_value = data_attr.value(reader).map_err(|e2| {
+                crate::error::VmkatzError::DecryptionError(format!("Attribute value error: {}", e2))
+            })?;
+            let mut offset = 0usize;
+            const CHUNK: usize = 4096;
+            while offset < buf.len() {
+                let end = (offset + CHUNK).min(buf.len());
+                match data_value.read_exact(reader, &mut buf[offset..end]) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        // Zero-fill this chunk and try to advance
+                        buf[offset..end].fill(0);
+                    }
+                }
+                offset = end;
+            }
+            Ok(buf)
+        }
+    }
 }
 
 /// List all file/directory names in a directory.
@@ -170,6 +193,7 @@ pub(crate) fn navigate_to_dir<'n, R: Read + Seek>(
 }
 
 /// Read SAM, SYSTEM, and (optionally) SECURITY hive files from NTFS filesystem.
+/// On I/O errors during directory traversal, falls back to MFTMirr approach.
 pub(super) fn read_hive_files<R: Read + Seek>(
     reader: &mut R,
     partition_offset: u64,
@@ -188,26 +212,37 @@ pub(super) fn read_hive_files<R: Read + Seek>(
     match ntfs.root_directory(&mut part_reader) {
         Ok(root) => {
             // Navigate: Windows/System32/config/
-            let windows = find_entry(&ntfs, &root, &mut part_reader, "Windows")?;
-            let system32 = find_entry(&ntfs, &windows, &mut part_reader, "System32")?;
-            let config = find_entry(&ntfs, &system32, &mut part_reader, "config")?;
+            // Wrap the entire traversal to catch I/O errors mid-way
+            let result = (|| -> Result<super::HiveFiles> {
+                let windows = find_entry(&ntfs, &root, &mut part_reader, "Windows")?;
+                let system32 = find_entry(&ntfs, &windows, &mut part_reader, "System32")?;
+                let config = find_entry(&ntfs, &system32, &mut part_reader, "config")?;
 
-            let sam_file = find_entry(&ntfs, &config, &mut part_reader, "SAM")?;
-            let system_file = find_entry(&ntfs, &config, &mut part_reader, "SYSTEM")?;
+                let sam_file = find_entry(&ntfs, &config, &mut part_reader, "SAM")?;
+                let system_file = find_entry(&ntfs, &config, &mut part_reader, "SYSTEM")?;
 
-            let sam_data = read_file_data(&sam_file, &mut part_reader)?;
-            let system_data = read_file_data(&system_file, &mut part_reader)?;
+                let sam_data = read_file_data(&sam_file, &mut part_reader)?;
+                let system_data = read_file_data(&system_file, &mut part_reader)?;
 
-            // SECURITY hive is optional - not all disk images may have it accessible
-            let security_data = find_entry(&ntfs, &config, &mut part_reader, "SECURITY")
-                .ok()
-                .and_then(|f| read_file_data(&f, &mut part_reader).ok());
+                // SECURITY hive is optional
+                let security_data = find_entry(&ntfs, &config, &mut part_reader, "SECURITY")
+                    .ok()
+                    .and_then(|f| read_file_data(&f, &mut part_reader).ok());
 
-            Ok((sam_data, system_data, security_data))
+                Ok((sam_data, system_data, security_data))
+            })();
+
+            match result {
+                Ok(hives) => Ok(hives),
+                Err(e) => {
+                    log::info!("NTFS traversal error: {}, trying MFTMirr fallback", e);
+                    drop(ntfs);
+                    ntfs_fallback::try_mftmirr_fallback(part_reader.inner_mut(), partition_offset)
+                }
+            }
         }
         Err(e) => {
             log::info!("NTFS root dir error: {}, trying MFTMirr fallback", e,);
-            // Drop ntfs/part_reader borrows, then use MFTMirr fallback
             drop(ntfs);
             ntfs_fallback::try_mftmirr_fallback(part_reader.inner_mut(), partition_offset)
         }
@@ -215,6 +250,7 @@ pub(super) fn read_hive_files<R: Read + Seek>(
 }
 
 /// Read NTDS.dit + SYSTEM hive from NTFS filesystem.
+/// Uses resilient file reads — I/O errors on individual clusters are zero-filled.
 pub(super) fn read_ntds_artifacts<R: Read + Seek>(
     reader: &mut R,
     partition_offset: u64,
